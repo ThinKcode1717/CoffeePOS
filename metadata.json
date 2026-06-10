@@ -1,0 +1,6 @@
+{
+  "name": "CaffePOS",
+  "description": "Sistem Point of Sale (POS) berbasis Cloud dengan self-ordering via QR Code, keanggotaan loyalitas member otomatis, manajemen pesanan dapur, dan analitik penjualan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
