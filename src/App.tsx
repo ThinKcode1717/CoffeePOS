@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { MenuItem, Table, Banner, Order, Review, User, LoyaltyRule, OrderStatus, PaymentStatus, Ingredient } from './types';
+import { MenuItem, Table, Banner, Order, Review, User, LoyaltyRule, OrderStatus, PaymentStatus, Ingredient, TableStatus } from './types';
 import { 
   INITIAL_MENU_ITEMS, 
   INITIAL_TABLES, 
@@ -66,17 +66,114 @@ export default function App() {
     return saved ? JSON.parse(saved) : null;
   });
 
-  const [loyaltyRule, setLoyaltyRule] = useState<LoyaltyRule>(() => {
-    return {
-      pointsPerTenThousand: 1,
-      rewardPointsThreshold: 50,
-      rewardDiscountValue: 1000,
-    };
+  const [loyaltyRule, setLoyaltyRule] = useState<LoyaltyRule>({
+    pointsPerTenThousand: 1,
+    rewardPointsThreshold: 50,
+    rewardDiscountValue: 1000,
   });
 
   const [selectedTableId, setSelectedTableId] = useState<string>('T01');
 
-  // Push updates to localStorage
+  // New Neon DB Connection Status State
+  const [dbStatus, setDbStatus] = useState<{ connected: boolean; message: string }>({
+    connected: false,
+    message: 'Mengecek koneksi database...'
+  });
+
+  // Query Backend on Mount to sync with Neon (if active)
+  useEffect(() => {
+    fetch('/api/db-status')
+      .then(res => res.json())
+      .then(status => {
+        setDbStatus(status);
+        if (status.connected) {
+          console.log('[Neon Sync] DB is connected. Loading actual tables...');
+          fetch('/api/ingredients').then(res => res.json()).then(setIngredients).catch(console.error);
+          fetch('/api/menu-items').then(res => res.json()).then(setMenuItems).catch(console.error);
+          fetch('/api/tables').then(res => res.json()).then(setTables).catch(console.error);
+          fetch('/api/users').then(res => res.json()).then(setMembers).catch(console.error);
+          fetch('/api/orders').then(res => res.json()).then(setOrders).catch(console.error);
+          fetch('/api/reviews').then(res => res.json()).then(setReviews).catch(console.error);
+          fetch('/api/loyalty-rule').then(res => res.json()).then(setLoyaltyRule).catch(console.error);
+        }
+      })
+      .catch(err => {
+        console.warn('Backend is offline or running client-only. Falling back to local storage.');
+        setDbStatus({ connected: false, message: 'Offline Demo (Local Storage)' });
+      });
+  }, []);
+
+  // Sync state helpers to ensure stock_keeper or local changes also push to Neon DB
+  const syncIngredientToDb = async (ing: Ingredient) => {
+    if (dbStatus.connected) {
+      await fetch('/api/ingredients', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(ing)
+      }).catch(err => console.error('Error syncing ingredient to Neon:', err));
+    }
+  };
+
+  const handleSetIngredients = (updated: Ingredient[] | ((prev: Ingredient[]) => Ingredient[])) => {
+    setIngredients(prev => {
+      const next = typeof updated === 'function' ? updated(prev) : updated;
+      if (dbStatus.connected) {
+        for (const ing of next) {
+          syncIngredientToDb(ing);
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleSetMenuItems = (updated: MenuItem[] | ((prev: MenuItem[]) => MenuItem[])) => {
+    setMenuItems(prev => {
+      const next = typeof updated === 'function' ? updated(prev) : updated;
+      if (dbStatus.connected) {
+        for (const item of next) {
+          fetch('/api/menu-items', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(item)
+          }).catch(console.error);
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleSetTables = (updated: Table[] | ((prev: Table[]) => Table[])) => {
+    setTables(prev => {
+      const next = typeof updated === 'function' ? updated(prev) : updated;
+      if (dbStatus.connected) {
+        for (const t of next) {
+          fetch('/api/tables', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(t)
+          }).catch(console.error);
+        }
+      }
+      return next;
+    });
+  };
+
+  const handleSetReviews = (updated: Review[] | ((prev: Review[]) => Review[])) => {
+    setReviews(prev => {
+      const next = typeof updated === 'function' ? updated(prev) : updated;
+      // In production, we can sync individual updates as needed.
+      return next;
+    });
+  };
+
+  const handleSetMembers = (updated: User[] | ((prev: User[]) => User[])) => {
+    setMembers(prev => {
+      const next = typeof updated === 'function' ? updated(prev) : updated;
+      return next;
+    });
+  };
+
+  // Push updates to localStorage as secondary backup
   useEffect(() => {
     localStorage.setItem('caffepos_ingredients', JSON.stringify(ingredients));
   }, [ingredients]);
@@ -154,6 +251,7 @@ export default function App() {
                     const ingToDeduct = copy.find(i => i.id === recipeItem.ingredientId);
                     if (ingToDeduct) {
                       ingToDeduct.stock = Math.max(0, ingToDeduct.stock - (recipeItem.quantity * orderItem.quantity));
+                      syncIngredientToDb(ingToDeduct);
                     }
                   });
                 }
@@ -161,9 +259,31 @@ export default function App() {
               return copy;
             });
 
-            setTables(ts => ts.map(t => t.id === o.tableId ? { ...t, status: 'occupied' } : t));
+            setTables(ts => {
+              const nextT = ts.map(t => t.id === o.tableId ? { ...t, status: 'occupied' as TableStatus } : t);
+              const affected = nextT.find(t => t.id === o.tableId);
+              if (dbStatus.connected && affected) {
+                fetch('/api/tables', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(affected)
+                }).catch(console.error);
+              }
+              return nextT;
+            });
           } else if (nextStatus === 'served') {
-            setTables(ts => ts.map(t => t.id === o.tableId ? { ...t, status: 'available' } : t));
+            setTables(ts => {
+              const nextT = ts.map(t => t.id === o.tableId ? { ...t, status: 'available' as TableStatus } : t);
+              const affected = nextT.find(t => t.id === o.tableId);
+              if (dbStatus.connected && affected) {
+                fetch('/api/tables', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(affected)
+                }).catch(console.error);
+              }
+              return nextT;
+            });
           }
           return { ...o, orderStatus: nextStatus };
         }
@@ -171,6 +291,14 @@ export default function App() {
       });
       return updated;
     });
+
+    if (dbStatus.connected) {
+      fetch(`/api/orders/${orderId}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderStatus: nextStatus })
+      }).catch(console.error);
+    }
   };
 
   const handleConfirmCashPayment = (orderId: string) => {
@@ -183,20 +311,56 @@ export default function App() {
       });
       return updated;
     });
+
+    if (dbStatus.connected) {
+      fetch(`/api/orders/${orderId}/confirm-payment`, {
+        method: 'POST'
+      }).catch(console.error);
+    }
   };
 
   const handleAddOrder = (newOrder: Order) => {
     setOrders(prev => [...prev, newOrder]);
+    if (dbStatus.connected) {
+      fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newOrder)
+      }).catch(console.error);
+    }
   };
 
   const handleAddReview = (newReview: Review) => {
     setReviews(prev => [...prev, newReview]);
+    if (dbStatus.connected) {
+      fetch('/api/reviews', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newReview)
+      }).catch(console.error);
+    }
   };
 
   const handleUpdateUserPoints = (userId: string, points: number) => {
-    setMembers(prev => prev.map(m => m.id === userId ? { ...m, points } : m));
+    let targetMember: User | undefined;
+    setMembers(prev => prev.map(m => {
+      if (m.id === userId) {
+        const u = { ...m, points };
+        targetMember = u;
+        return u;
+      }
+      return m;
+    }));
     if (currentUser && currentUser.id === userId) {
       setCurrentUser(prev => prev ? { ...prev, points } : null);
+    }
+
+    if (dbStatus.connected && targetMember) {
+      fetch('/api/users/upsert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(targetMember)
+      }).catch(console.error);
     }
   };
 
@@ -204,6 +368,13 @@ export default function App() {
     setMembers(prev => {
       const exists = prev.some(m => m.phone === newUser.phone);
       if (exists) return prev;
+      if (dbStatus.connected) {
+        fetch('/api/users/upsert', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newUser)
+        }).catch(console.error);
+      }
       return [...prev, newUser];
     });
   };
@@ -218,7 +389,21 @@ export default function App() {
             <Coffee className="w-6 h-6 animate-pulse" />
           </div>
           <div>
-            <h1 className="text-base font-extrabold tracking-tight text-slate-900 leading-none">CaffePOS Platform</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-base font-extrabold tracking-tight text-slate-900 leading-none">CaffePOS Platform</h1>
+              {dbStatus.connected ? (
+                <span className="inline-flex items-center gap-1.5 px-2.1 py-0.5 bg-emerald-50 text-emerald-700 text-[10px] font-bold rounded-full border border-emerald-100">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping absolute" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 relative" />
+                  <span>Neon DB Connected</span>
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 px-2.1 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-bold rounded-full border border-amber-100" title={dbStatus.message}>
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-50 rounded-full bg-amber-500" />
+                  <span>Demo Mode</span>
+                </span>
+              )}
+            </div>
             <p className="text-xs text-slate-400 mt-1">Simulasi interaksi Kasir, Pelanggan, & Dapur secara real-time</p>
           </div>
         </div>
@@ -286,18 +471,18 @@ export default function App() {
           <div className="w-full py-4">
             <AdminView 
               menuItems={menuItems}
-              onSetMenuItems={setMenuItems}
+              onSetMenuItems={handleSetMenuItems}
               tables={tables}
-              onSetTables={setTables}
+              onSetTables={handleSetTables}
               banners={banners}
               onSetBanners={setBanners}
               orders={orders}
               onUpdateOrderStatus={handleUpdateOrderStatus}
               onConfirmCashPayment={handleConfirmCashPayment}
               reviews={reviews}
-              onSetReviews={setReviews}
+              onSetReviews={handleSetReviews}
               members={members}
-              onSetMembers={setMembers}
+              onSetMembers={handleSetMembers}
               loyaltyRule={loyaltyRule}
               onSetLoyaltyRule={setLoyaltyRule}
               historicalSales={HISTORICAL_SALES}
@@ -326,7 +511,7 @@ export default function App() {
           <div className="w-full py-4">
             <StockKeeperView 
               ingredients={ingredients}
-              onSetIngredients={setIngredients}
+              onSetIngredients={handleSetIngredients}
               menuItems={menuItems}
               orders={orders}
             />
